@@ -293,6 +293,12 @@ struct Cli {
         help = t!("core_clap.ipv6_listener").to_string()
     )]
     ipv6_listener: Option<String>,
+
+    #[arg(long, default_value_t = false)]
+    enable_magic_dns: bool,
+
+    #[arg(long, default_value_t = false)]
+    enable_magic_dns_server: bool,
 }
 
 rust_i18n::i18n!("locales", fallback = "en");

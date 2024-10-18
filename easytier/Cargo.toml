@@ -181,6 +181,7 @@ sys-locale = "0.3"
 
 ringbuf = "0.4.5"
 async-ringbuf = "0.3.1"
+hickory-dns = { version = "0.24.1", features = ["rustls"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = [
@@ -215,7 +216,7 @@ tokio-socks = "0.5.2"
 
 
 [features]
-default = ["wireguard", "mimalloc", "websocket", "smoltcp", "tun", "socks5"]
+default = ["wireguard", "mimalloc", "websocket", "smoltcp", "tun", "socks5", "dns"]
 full = [
     "quic",
     "websocket",
@@ -225,6 +226,7 @@ full = [
     "smoltcp",
     "tun",
     "socks5",
+    "dns"
 ]
 mips = ["aes-gcm", "mimalloc", "wireguard", "tun", "smoltcp", "socks5"]
 wireguard = ["dep:boringtun", "dep:ring"]
@@ -241,3 +243,4 @@ websocket = [
 ]
 smoltcp = ["dep:smoltcp", "dep:parking_lot"]
 socks5 = ["dep:smoltcp"]
+dns = ["dep:hickory-dns"]

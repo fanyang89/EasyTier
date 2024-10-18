@@ -29,3 +29,5 @@ musl_gcc
 
 # log
 easytier-panic.log
+
+/.idea
