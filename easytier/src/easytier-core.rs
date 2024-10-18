@@ -293,10 +293,12 @@ struct Cli {
         help = t!("core_clap.ipv6_listener").to_string()
     )]
     ipv6_listener: Option<String>,
-
+    
+    #[cfg(feature = "dns")]
     #[arg(long, default_value_t = false)]
     enable_magic_dns: bool,
 
+    #[cfg(feature = "dns")]
     #[arg(long, default_value_t = false)]
     enable_magic_dns_server: bool,
 }
