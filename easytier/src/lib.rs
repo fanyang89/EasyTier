@@ -8,6 +8,7 @@ mod peer_center;
 mod peers;
 mod proto;
 mod vpn_portal;
+mod dns;
 
 pub mod common;
 pub mod launcher;
