@@ -27,3 +27,12 @@ lto = true
 codegen-units = 1
 opt-level = 3
 strip = true
+
+# Faster iteration for `cargo bench`: disable LTO and raise codegen-units so
+# incremental rebuilds after small edits finish in seconds instead of minutes.
+[profile.bench]
+inherits = "release"
+lto = false
+codegen-units = 16
+debug = false
+strip = false

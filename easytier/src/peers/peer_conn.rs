@@ -363,7 +363,15 @@ impl PeerConn {
         let throughput = peer_conn_tunnel_filter.filter_output();
         let filter_chain = TunnelFilterChain::new(session_filter.clone(), peer_conn_tunnel_filter);
         let peer_conn_tunnel = TunnelWithFilter::new(tunnel, filter_chain);
-        let mut mpsc_tunnel = MpscTunnel::new(peer_conn_tunnel, Some(Duration::from_secs(7)));
+        let supports_direct = peer_conn_tunnel
+            .info()
+            .map(|i| matches!(i.tunnel_type.as_str(), "ring" | "udp" | "tcp"))
+            .unwrap_or(false);
+        let mut mpsc_tunnel = if supports_direct {
+            MpscTunnel::new_direct(peer_conn_tunnel)
+        } else {
+            MpscTunnel::new(peer_conn_tunnel, Some(Duration::from_secs(7)))
+        };
 
         let (recv, sink) = (mpsc_tunnel.get_stream(), mpsc_tunnel.get_sink());
 
@@ -434,6 +442,10 @@ impl PeerConn {
 
     pub fn get_conn_id(&self) -> PeerConnId {
         self.conn_id
+    }
+
+    pub fn set_batch_threshold(&self, n: u32) {
+        self.sink.set_batch_threshold(n);
     }
 
     pub fn set_is_hole_punched(&mut self, is_hole_punched: bool) {

@@ -1,6 +1,13 @@
 // this mod wrap tunnel to a mpsc tunnel, based on crossbeam_channel
 
-use std::{pin::Pin, time::Duration};
+use std::{
+    cell::UnsafeCell,
+    pin::Pin,
+    sync::Arc,
+    sync::atomic::{AtomicBool, AtomicU32, Ordering},
+    task::Poll,
+    time::Duration,
+};
 
 use anyhow::Context;
 use tokio::time::timeout;
@@ -11,7 +18,6 @@ use super::{Tunnel, TunnelError, ZCPacketSink, ZCPacketStream, packet_def::ZCPac
 
 use tokio::sync::mpsc::{Receiver, Sender, channel, error::TrySendError};
 use tokio_util::task::AbortOnDropHandle;
-// use tachyonix::{channel, Receiver, Sender, TrySendError};
 
 use futures::SinkExt;
 
@@ -21,30 +27,173 @@ const MPSC_TUNNEL_CHANNEL_SIZE: usize = 1024;
 // forward task keeps making progress instead of timing out on a full batch.
 const MPSC_TUNNEL_FORWARD_BATCH_SIZE: usize = 32;
 
+
+/// A simple spinlock protecting a sink. The guard is Send because it only
+/// contains an atomic flag reference (no lifetime-tied borrow like MutexGuard).
+struct SpinSink {
+    locked: AtomicBool,
+    sink: UnsafeCell<Pin<Box<dyn ZCPacketSink>>>,
+    pending_count: AtomicU32,
+    batch_threshold: AtomicU32,
+}
+
+// SAFETY: access is serialized by the spinlock.
+unsafe impl Send for SpinSink {}
+unsafe impl Sync for SpinSink {}
+
+struct SpinGuard<'a> {
+    spin: &'a SpinSink,
+}
+
+impl<'a> SpinGuard<'a> {
+    fn as_mut(&mut self) -> Pin<&mut dyn ZCPacketSink> {
+        // SAFETY: we hold the spinlock, so we have exclusive access
+        let sink = unsafe { &mut *self.spin.sink.get() };
+        sink.as_mut()
+    }
+}
+
+impl Drop for SpinGuard<'_> {
+    fn drop(&mut self) {
+        self.spin.locked.store(false, Ordering::Release);
+    }
+}
+
+impl SpinSink {
+    fn new(sink: Pin<Box<dyn ZCPacketSink>>) -> Self {
+        Self {
+            locked: AtomicBool::new(false),
+            sink: UnsafeCell::new(sink),
+            pending_count: AtomicU32::new(0),
+            batch_threshold: AtomicU32::new(1),
+        }
+    }
+
+    fn set_batch_threshold(&self, n: u32) {
+        self.batch_threshold.store(n, Ordering::Relaxed);
+    }
+
+    fn try_lock(&self) -> Option<SpinGuard<'_>> {
+        if self
+            .locked
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            Some(SpinGuard { spin: self })
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Clone)]
-pub struct MpscTunnelSender(Sender<ZCPacket>);
+pub struct MpscTunnelSender {
+    channel_tx: Option<Sender<ZCPacket>>,
+    direct_sink: Option<Arc<SpinSink>>,
+    direct_batch_flush: bool,
+}
 
 impl MpscTunnelSender {
     pub async fn send(&self, item: ZCPacket) -> Result<(), TunnelError> {
-        self.0.send(item).await.with_context(|| "send error")?;
+        if let Some(sink) = &self.direct_sink {
+            // Sync fast path with cooperative backpressure. We poll the sink
+            // with a noop waker so the common case (buffer has space) completes
+            // with zero async machinery overhead. When the buffer is full,
+            // poll_ready returns Pending under a noop waker that can never wake
+            // us; instead of turning that into an error (which would drop
+            // backpressure and cause BufferFull panics) or parking on a real
+            // waker (whose wake latency is ~1000x a yield and dominates the
+            // ring-full case), we yield cooperatively: the send task stays
+            // runnable but lets the consumer (forward task / ring drain) take a
+            // scheduling slot, then retries the fast path. This is real
+            // backpressure — the producer makes no progress until the consumer
+            // frees capacity — without the park/unpark tax.
+            loop {
+                if let Some(mut guard) = sink.try_lock() {
+                    let waker = futures::task::noop_waker();
+                    let mut cx = std::task::Context::from_waker(&waker);
+                    match guard.as_mut().poll_ready(&mut cx) {
+                        Poll::Ready(Ok(())) => {
+                            guard.as_mut().start_send(item)?;
+                            Self::batch_flush(sink, &mut guard, &mut cx)?;
+                            return Ok(());
+                        }
+                        Poll::Ready(Err(e)) => return Err(e),
+                        Poll::Pending => {
+                            // Buffer full: yield so the consumer can drain,
+                            // then retry the fast path.
+                        }
+                    }
+                }
+                // Either the spinlock is contended or the buffer is full:
+                // yield to the runtime and retry.
+                tokio::task::yield_now().await;
+            }
+        }
+
+        // Channel mode: async with backpressure
+        self.send_async(item).await
+    }
+
+    // Batch flush helper. pending_count tracks items accumulated since the last
+    // flush; once it crosses the threshold we issue one poll_flush (writev for
+    // FramedWriter, no-op for RingSink). poll_flush returning Pending is treated
+    // as success: the data is already in the ring buffer / BufList and will be
+    // consumed by the forward task or a later send (TCP send buffer full is not
+    // an error, see bench/007 坑10). A Ready(Err) (real failure, e.g. closed
+    // connection) is propagated to the caller.
+    fn batch_flush(
+        sink: &SpinSink,
+        guard: &mut SpinGuard<'_>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Result<(), TunnelError> {
+        let count = sink.pending_count.fetch_add(1, Ordering::Relaxed) + 1;
+        let threshold = sink.batch_threshold.load(Ordering::Relaxed);
+        if count >= threshold {
+            sink.pending_count.store(0, Ordering::Relaxed);
+            if let Poll::Ready(Err(e)) = guard.as_mut().poll_flush(cx) {
+                return Err(e);
+            }
+        }
         Ok(())
     }
 
     pub fn try_send(&self, item: ZCPacket) -> Result<(), TunnelError> {
-        self.0.try_send(item).map_err(|e| match e {
+        let tx = self.channel_tx.as_ref().ok_or(TunnelError::Shutdown)?;
+        tx.try_send(item).map_err(|e| match e {
             TrySendError::Full(_) => TunnelError::BufferFull,
             TrySendError::Closed(_) => TunnelError::Shutdown,
         })
+    }
+
+    pub fn set_batch_threshold(&self, n: u32) {
+        if let Some(sink) = &self.direct_sink {
+            sink.set_batch_threshold(n);
+        }
+    }
+
+    pub async fn send_async(&self, item: ZCPacket) -> Result<(), TunnelError> {
+        let tx = self.channel_tx.as_ref().ok_or(TunnelError::Shutdown)?;
+        match tx.try_send(item) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(item)) => {
+                tx.send(item).await.with_context(|| "send error")?;
+                Ok(())
+            }
+            Err(TrySendError::Closed(_)) => Err(TunnelError::Shutdown),
+        }
     }
 }
 
 pub struct MpscTunnel<T> {
     tx: Option<Sender<ZCPacket>>,
+    direct_sink: Option<Arc<SpinSink>>,
+    direct_batch_flush: bool,
 
     tunnel: T,
     stream: Option<Pin<Box<dyn ZCPacketStream>>>,
 
-    task: AbortOnDropHandle<()>,
+    task: Option<AbortOnDropHandle<()>>,
 }
 
 impl<T: Tunnel> MpscTunnel<T> {
@@ -66,9 +215,28 @@ impl<T: Tunnel> MpscTunnel<T> {
 
         Self {
             tx: Some(tx),
+            direct_sink: None,
+            direct_batch_flush: false,
             tunnel,
             stream: Some(stream),
-            task: AbortOnDropHandle::new(task),
+            task: Some(AbortOnDropHandle::new(task)),
+        }
+    }
+
+    pub fn new_direct(tunnel: T) -> Self {
+        let (stream, sink) = tunnel.split();
+        let info = tunnel.info();
+        let batch_flush = info
+            .as_ref()
+            .map(|i| matches!(i.tunnel_type.as_str(), "ring" | "udp"))
+            .unwrap_or(false);
+        Self {
+            tx: None,
+            direct_sink: Some(Arc::new(SpinSink::new(sink))),
+            direct_batch_flush: batch_flush,
+            tunnel,
+            stream: Some(stream),
+            task: None,
         }
     }
 
@@ -133,12 +301,19 @@ impl<T: Tunnel> MpscTunnel<T> {
     }
 
     pub fn get_sink(&self) -> MpscTunnelSender {
-        MpscTunnelSender(self.tx.as_ref().unwrap().clone())
+        MpscTunnelSender {
+            channel_tx: self.tx.as_ref().cloned(),
+            direct_sink: self.direct_sink.clone(),
+            direct_batch_flush: self.direct_batch_flush,
+        }
     }
 
     pub fn close(&mut self) {
         self.tx.take();
-        self.task.abort();
+        self.direct_sink.take();
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
     }
 
     pub fn tunnel_info(&self) -> Option<TunnelInfo> {
@@ -270,6 +445,47 @@ mod tests {
         .expect("forward task stopped while the sink was making progress");
     }
 
+    // Reproduces the direct sink path backpressure: fill the ring (no consumer),
+    // then send must park on the slow path and be woken once a consumer drains
+    // the server stream. Validates the noop_waker fast path -> poll_fn real
+    // waker slow path transition.
+    #[tokio::test]
+    async fn mpsc_direct_sink_backpressure_wakes_after_drain() {
+        let (server_tun, client_tun) = create_ring_tunnel_pair();
+        let client = MpscTunnel::new_direct(client_tun);
+        let sink = client.get_sink();
+
+        // Fill the ring with no consumer. The first RING_TUNNEL_CAP sends land
+        // in the ring buffer; subsequent sends must exercise the slow path.
+        for i in 0..RING_TUNNEL_CAP {
+            sink.send(ZCPacket::new_with_payload(&[i as u8; 64]))
+                .await
+                .expect("fill send must succeed");
+        }
+
+        // Spawn a consumer that drains the server stream after 100ms. The ring
+        // is full at this point, so the next send must park and be woken.
+        let _drain = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let (mut stream, _sink) = server_tun.split();
+            loop {
+                match tokio::time::timeout(Duration::from_millis(50), stream.next()).await {
+                    Ok(Some(_)) => continue,
+                    _ => break,
+                }
+            }
+        });
+
+        // This send must complete once the consumer drains the ring.
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            sink.send(ZCPacket::new_with_payload(&[0x42; 64])),
+        )
+        .await
+        .expect("direct sink send was not woken after ring drain")
+        .expect("send returned error");
+    }
+
     // test slow send lock in framed tunnel
     #[tokio::test]
     async fn mpsc_slow_receiver() {
@@ -311,8 +527,7 @@ mod tests {
             for i in 0..1000000 {
                 tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                 let a = sink1
-                    .send(ZCPacket::new_with_payload("hello".as_bytes()))
-                    .await;
+                    .send_async(ZCPacket::new_with_payload("hello".as_bytes())).await;
                 if a.is_err() {
                     tracing::info!(?a, "t2 exit with err");
                     break;
@@ -331,8 +546,7 @@ mod tests {
             for i in 0..1000000 {
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 let a = sink2
-                    .send(ZCPacket::new_with_payload("hello2".as_bytes()))
-                    .await;
+                    .send_async(ZCPacket::new_with_payload("hello2".as_bytes())).await;
                 if a.is_err() {
                     tracing::info!(?a, "t3 exit with err");
                     break;
