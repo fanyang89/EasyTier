@@ -186,7 +186,7 @@ impl Peer {
         Ok(())
     }
 
-    async fn select_conn(&self) -> Option<ArcPeerConn> {
+    fn select_conn(&self) -> Option<ArcPeerConn> {
         let default_conn_id = self.default_conn_id.load();
         if let Some(conn) = self.conns.get(&default_conn_id) {
             return Some(conn.clone());
@@ -208,7 +208,7 @@ impl Peer {
     }
 
     pub async fn send_msg(&self, msg: ZCPacket) -> Result<(), Error> {
-        let Some(conn) = self.select_conn().await else {
+        let Some(conn) = self.select_conn() else {
             return Err(Error::PeerNoConnectionError(self.peer_node_id));
         };
         conn.send_msg(msg).await?;

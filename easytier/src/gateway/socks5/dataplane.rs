@@ -440,7 +440,7 @@ mod tests {
         wait_for_condition(
             || async {
                 a.get_route()
-                    .get_peer_id_by_ipv4(&b_ip.address())
+                    .get_peer_id_by_ipv4(&b_ip.address()).await
                     .await
                     .is_some()
             },

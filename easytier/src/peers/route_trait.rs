@@ -114,7 +114,7 @@ pub trait Route {
         ListPublicIpv6InfoResponse::default()
     }
 
-    async fn get_peer_id_by_ipv4(&self, _ipv4: &Ipv4Addr) -> Option<PeerId> {
+    fn get_peer_id_by_ipv4(&self, _ipv4: &Ipv4Addr) -> Option<PeerId> {
         None
     }
 
@@ -124,7 +124,7 @@ pub trait Route {
 
     async fn get_peer_id_by_ip(&self, ip: &std::net::IpAddr) -> Option<PeerId> {
         match ip {
-            std::net::IpAddr::V4(v4) => self.get_peer_id_by_ipv4(v4).await,
+            std::net::IpAddr::V4(v4) => self.get_peer_id_by_ipv4(v4),
             std::net::IpAddr::V6(v6) => self.get_peer_id_by_ipv6(v6).await,
         }
     }
@@ -172,7 +172,7 @@ pub trait Route {
     }
 
     async fn get_peer_groups_by_ipv4(&self, ipv4: &Ipv4Addr) -> Arc<Vec<String>> {
-        match self.get_peer_id_by_ipv4(ipv4).await {
+        match self.get_peer_id_by_ipv4(ipv4) {
             Some(peer_id) => self.get_peer_groups(peer_id),
             None => Arc::new(Vec::new()),
         }

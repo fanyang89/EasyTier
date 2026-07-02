@@ -305,8 +305,7 @@ impl NatDstConnector for NatDstQuicConnector {
             };
             peer_mgr
                 .get_peer_map()
-                .get_peer_id_by_ipv4(addr.ip())
-                .await
+                .get_peer_id_by_ipv4(addr.ip()).await
                 .ok_or_else(|| anyhow!("no peer found for nat dst: {}", nat_dst))?
         };
 

@@ -381,6 +381,7 @@ fn no_tun_config(
     config.set_listeners(listeners);
     let mut flags = config.get_flags();
     flags.no_tun = true;
+    flags.enable_encryption = env_string("TX_THROUGHPUT_ENABLE_ENC", "1") != "0";
     config.set_flags(flags);
     config
 }

@@ -9,18 +9,13 @@ use zstd::bulk;
 
 use zerocopy::{AsBytes as _, FromBytes as _};
 
-use crate::tunnel::packet_def::{COMPRESSOR_TAIL_SIZE, CompressorAlgo, CompressorTail, ZCPacket};
+use crate::tunnel::packet_def::{CompressorAlgo, CompressorTail, ZCPacket, COMPRESSOR_TAIL_SIZE};
 
 type Error = anyhow::Error;
 
-#[async_trait::async_trait]
 pub trait Compressor {
-    async fn compress(
-        &self,
-        packet: &mut ZCPacket,
-        compress_algo: CompressorAlgo,
-    ) -> Result<(), Error>;
-    async fn decompress(&self, packet: &mut ZCPacket) -> Result<(), Error>;
+    fn compress(&self, packet: &mut ZCPacket, compress_algo: CompressorAlgo) -> Result<(), Error>;
+    fn decompress(&self, packet: &mut ZCPacket) -> Result<(), Error>;
 }
 
 pub struct DefaultCompressor {}
@@ -36,7 +31,7 @@ impl DefaultCompressor {
         DefaultCompressor {}
     }
 
-    pub async fn compress_raw(
+    pub fn compress_raw(
         &self,
         data: &[u8],
         compress_algo: CompressorAlgo,
@@ -57,7 +52,7 @@ impl DefaultCompressor {
         }
     }
 
-    pub async fn decompress_raw(
+    pub fn decompress_raw(
         &self,
         data: &[u8],
         compress_algo: CompressorAlgo,
@@ -90,9 +85,8 @@ impl DefaultCompressor {
     }
 }
 
-#[async_trait::async_trait]
 impl Compressor for DefaultCompressor {
-    async fn compress(
+    fn compress(
         &self,
         zc_packet: &mut ZCPacket,
         compress_algo: CompressorAlgo,
@@ -107,9 +101,7 @@ impl Compressor for DefaultCompressor {
         }
 
         let tail = CompressorTail::new(compress_algo);
-        let buf = self
-            .compress_raw(zc_packet.payload(), compress_algo)
-            .await?;
+        let buf = self.compress_raw(zc_packet.payload(), compress_algo)?;
 
         if buf.len() + COMPRESSOR_TAIL_SIZE > pm_header.len.get() as usize {
             // Compressed data is larger than original data, don't compress
@@ -129,7 +121,7 @@ impl Compressor for DefaultCompressor {
         Ok(())
     }
 
-    async fn decompress(&self, zc_packet: &mut ZCPacket) -> Result<(), Error> {
+    fn decompress(&self, zc_packet: &mut ZCPacket) -> Result<(), Error> {
         let pm_header = zc_packet.peer_manager_header().unwrap();
         if !pm_header.is_compressed() {
             return Ok(());
@@ -150,9 +142,7 @@ impl Compressor for DefaultCompressor {
             .get_algo()
             .ok_or(anyhow::anyhow!("Unknown algo: {:?}", tail))?;
 
-        let buf = self
-            .decompress_raw(&zc_packet.payload()[..text_len], algo)
-            .await?;
+        let buf = self.decompress_raw(&zc_packet.payload()[..text_len], algo)?;
 
         if buf.len() != pm_header.len.get() as usize {
             anyhow::bail!(
@@ -185,8 +175,8 @@ thread_local! {
 pub mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_compress() {
+    #[test]
+    fn test_compress() {
         let text = b"12345670000000000000000000";
         let mut packet = ZCPacket::new_with_payload(text);
         packet.fill_peer_manager_hdr(0, 0, 0);
@@ -201,7 +191,6 @@ pub mod tests {
 
         compressor
             .compress(&mut packet, CompressorAlgo::ZstdDefault)
-            .await
             .unwrap();
         println!(
             "Compressed packet: {:?}, len: {}",
@@ -210,13 +199,13 @@ pub mod tests {
         );
         assert!(packet.peer_manager_header().unwrap().is_compressed());
 
-        compressor.decompress(&mut packet).await.unwrap();
+        compressor.decompress(&mut packet).unwrap();
         assert_eq!(packet.payload(), text);
         assert!(!packet.peer_manager_header().unwrap().is_compressed());
     }
 
-    #[tokio::test]
-    async fn test_short_text_compress() {
+    #[test]
+    fn test_short_text_compress() {
         let text = b"1234";
         let mut packet = ZCPacket::new_with_payload(text);
         packet.fill_peer_manager_hdr(0, 0, 0);
@@ -226,11 +215,10 @@ pub mod tests {
         // short text can't be compressed
         compressor
             .compress(&mut packet, CompressorAlgo::ZstdDefault)
-            .await
             .unwrap();
         assert!(!packet.peer_manager_header().unwrap().is_compressed());
 
-        compressor.decompress(&mut packet).await.unwrap();
+        compressor.decompress(&mut packet).unwrap();
         assert_eq!(packet.payload(), text);
         assert!(!packet.peer_manager_header().unwrap().is_compressed());
     }

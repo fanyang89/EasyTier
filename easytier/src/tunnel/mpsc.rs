@@ -27,6 +27,15 @@ const MPSC_TUNNEL_CHANNEL_SIZE: usize = 1024;
 // forward task keeps making progress instead of timing out on a full batch.
 const MPSC_TUNNEL_FORWARD_BATCH_SIZE: usize = 32;
 
+// temporary instrumentation: cumulative ns in sink.send fast path
+pub static T_SINK_SEND: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static T_SINK_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static T_LOCK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static T_POLL_READY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static T_START_SEND: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static T_FLUSH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+
 
 /// A simple spinlock protecting a sink. The guard is Send because it only
 /// contains an atomic flag reference (no lifetime-tied borrow like MutexGuard).

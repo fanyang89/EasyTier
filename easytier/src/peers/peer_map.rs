@@ -221,7 +221,7 @@ impl PeerMap {
 
     pub async fn get_peer_id_by_ipv4(&self, ipv4: &Ipv4Addr) -> Option<PeerId> {
         for route in self.routes.read().await.iter() {
-            let peer_id = route.get_peer_id_by_ipv4(ipv4).await;
+            let peer_id = route.get_peer_id_by_ipv4(ipv4);
             if peer_id.is_some() {
                 return peer_id;
             }

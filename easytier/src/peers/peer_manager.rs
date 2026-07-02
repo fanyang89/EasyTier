@@ -1090,8 +1090,7 @@ impl PeerManager {
                                 &encryptor,
                                 &mut ret,
                                 secure_mode_enabled,
-                            )
-                            .await;
+                            );
                         }
 
                         compress_tx_bytes_after.add(ret.buf_len() as u64);
@@ -1164,7 +1163,7 @@ impl PeerManager {
                     compress_rx_bytes_before.add(buf_len as u64);
 
                     let compressor = DefaultCompressor {};
-                    if let Err(e) = compressor.decompress(&mut ret).await {
+                    if let Err(e) = compressor.decompress(&mut ret) {
                         tracing::error!(?e, "decompress failed");
                         continue;
                     }
@@ -1510,8 +1509,7 @@ impl PeerManager {
             &self.encryptor,
             &mut msg,
             self.is_secure_mode_enabled,
-        )
-        .await?;
+        )?;
 
         self.self_tx_counters
             .compress_tx_bytes_after
@@ -1702,17 +1700,21 @@ impl PeerManager {
         (dst_peers, is_exit_node)
     }
 
-    pub async fn try_compress_and_encrypt(
+    pub fn try_compress_and_encrypt(
         compress_algo: CompressorAlgo,
         encryptor: &Arc<dyn Encryptor + 'static>,
         msg: &mut ZCPacket,
         secure_mode_enabled: bool,
     ) -> Result<(), Error> {
-        let compressor = DefaultCompressor {};
-        compressor
-            .compress(msg, compress_algo)
-            .await
-            .with_context(|| "compress failed")?;
+        // Fast path: skip the #[async_trait] Compressor entirely when no
+        // compression is configured. This avoids a BoxFuture heap allocation
+        // (async_trait desugaring) on every TX for the common case.
+        if !matches!(compress_algo, CompressorAlgo::None) {
+            let compressor = DefaultCompressor {};
+            compressor
+                .compress(msg, compress_algo)
+                .with_context(|| "compress failed")?;
+        }
         if !secure_mode_enabled {
             encryptor.encrypt(msg).with_context(|| "encrypt failed")?;
         }
@@ -1772,8 +1774,7 @@ impl PeerManager {
             &self.encryptor,
             &mut msg,
             self.is_secure_mode_enabled,
-        )
-        .await?;
+        )?;
 
         self.self_tx_counters
             .compress_tx_bytes_after

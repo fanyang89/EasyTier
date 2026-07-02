@@ -4098,7 +4098,7 @@ impl Route for PeerRoute {
         }
     }
 
-    async fn get_peer_id_by_ipv4(&self, ipv4_addr: &Ipv4Addr) -> Option<PeerId> {
+    fn get_peer_id_by_ipv4(&self, ipv4_addr: &Ipv4Addr) -> Option<PeerId> {
         let route_table = &self.service_impl.route_table;
         if let Some(p) = route_table.ipv4_peer_id_map.get(ipv4_addr) {
             return Some(p.peer_id);
@@ -6640,13 +6640,12 @@ mod tests {
             let p = p.clone();
             wait_for_condition(
                 || async {
-                    p_a.get_route().get_peer_id_by_ipv4(&ip.address()).await == Some(p.my_peer_id())
+                    p_a.get_route().get_peer_id_by_ipv4(&ip.address()) == Some(p.my_peer_id())
                         && p_a.get_route().get_peer_id_by_ipv6(&ipv6.address()).await
                             == Some(p.my_peer_id())
                         && p_a
                             .get_route()
                             .get_peer_id_by_ipv4(&proxy.first_address())
-                            .await
                             == Some(p.my_peer_id())
                 },
                 Duration::from_secs(5),
@@ -6723,7 +6722,7 @@ mod tests {
         // Wait for route convergence - A should route to C for the proxy CIDR
         wait_for_condition(
             || async {
-                let peer_id_for_proxy = route_a.get_peer_id_by_ipv4(&test_ip).await;
+                let peer_id_for_proxy = route_a.get_peer_id_by_ipv4(&test_ip);
                 peer_id_for_proxy == Some(p_c.my_peer_id())
             },
             Duration::from_secs(10),
@@ -6738,7 +6737,7 @@ mod tests {
 
         // Wait for route convergence - A should now route to itself for the proxy CIDR
         wait_for_condition(
-            || async { route_a.get_peer_id_by_ipv4(&test_ip).await == Some(p_a.my_peer_id()) },
+            || async { route_a.get_peer_id_by_ipv4(&test_ip) == Some(p_a.my_peer_id()) },
             Duration::from_secs(10),
         )
         .await;
@@ -6751,14 +6750,14 @@ mod tests {
 
         // Wait for route convergence - B should route to itself for the proxy CIDR
         wait_for_condition(
-            || async { route_b.get_peer_id_by_ipv4(&test_ip).await == Some(p_b.my_peer_id()) },
+            || async { route_b.get_peer_id_by_ipv4(&test_ip) == Some(p_b.my_peer_id()) },
             Duration::from_secs(5),
         )
         .await;
 
         // Final verification: A should still route to itself even with multiple conflicts
         assert_eq!(
-            route_a.get_peer_id_by_ipv4(&test_ip).await,
+            route_a.get_peer_id_by_ipv4(&test_ip),
             Some(p_a.my_peer_id())
         );
 
@@ -6766,7 +6765,7 @@ mod tests {
         p_a.get_global_ctx().config.remove_proxy_cidr(proxy_cidr);
         wait_for_condition(
             || async {
-                let peer_id_for_proxy = route_a.get_peer_id_by_ipv4(&test_ip).await;
+                let peer_id_for_proxy = route_a.get_peer_id_by_ipv4(&test_ip);
                 peer_id_for_proxy == Some(p_b.my_peer_id())
             },
             Duration::from_secs(10),
