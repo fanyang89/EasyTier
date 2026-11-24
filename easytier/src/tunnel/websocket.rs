@@ -335,6 +335,63 @@ pub mod tests {
     use crate::tunnel::common::tests::_tunnel_pingpong;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    // The Actions fixture supplies the local IPv4 and ifIndex independently via NetTCPIP.
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "requires a Windows IPv4 interface fixture"]
+    async fn connected_wss_retains_ipv4_interface() {
+        use std::os::windows::io::AsRawSocket;
+        use windows::{
+            Win32::Networking::WinSock::{IP_UNICAST_IF, IPPROTO_IP, SOCKET, getsockopt},
+            core::PSTR,
+        };
+
+        let ip: std::net::Ipv4Addr = std::env::var("LAB_IP").unwrap().parse().unwrap();
+        let index: u32 = std::env::var("LAB_IFINDEX").unwrap().parse().unwrap();
+        assert_ne!(index, 0);
+        for bound in [false, true] {
+            let mut listener = WsTunnelListener::new(format!("wss://{ip}:0").parse().unwrap());
+            listener.listen().await.unwrap();
+            let addr = listener.listener.as_ref().unwrap().local_addr().unwrap();
+            let url = listener.local_url();
+            let socket = if bound {
+                // Same auto-device binding as WsTunnelConnector::connect_with_custom_bind.
+                bind().addr((ip, 0).into()).only_v6(true).call().unwrap()
+            } else {
+                TcpSocket::new_v4().unwrap()
+            };
+            let probe = socket2::SockRef::from(&socket).try_clone().unwrap();
+            let (_client, _server) = timeout(Duration::from_secs(10), async {
+                tokio::try_join!(
+                    WsTunnelConnector::connect_with(url, addr, socket),
+                    listener.accept()
+                )
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+            let mut bytes = [0u8; 4];
+            let mut len = 4;
+            let ret = unsafe {
+                getsockopt(
+                    SOCKET(probe.as_raw_socket() as usize),
+                    IPPROTO_IP.0,
+                    IP_UNICAST_IF,
+                    PSTR(bytes.as_mut_ptr()),
+                    &mut len,
+                )
+            };
+            assert_eq!(ret, 0, "{}", std::io::Error::last_os_error());
+            assert_eq!(len, 4);
+            let actual = u32::from_be_bytes(bytes);
+            println!(
+                "WSS connected: bound={bound} expected_ifIndex={index} IP_UNICAST_IF={actual} raw={bytes:?}"
+            );
+            assert_eq!(actual, if bound { index } else { 0 });
+        }
+    }
+
     #[rstest::rstest]
     #[tokio::test]
     #[serial_test::serial]

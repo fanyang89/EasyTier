@@ -1,0 +1,39 @@
+name: Windows WSS interface check
+on:
+  push:
+    branches: [test/2474-windows-egress]
+permissions:
+  contents: read
+jobs:
+  socket:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/prepare-build
+        with:
+          gui: false
+          pnpm: false
+          token: ${{ github.token }}
+      - name: Select a real runner interface independently of EasyTier
+        shell: pwsh
+        run: |
+          $r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' |
+            Sort-Object { $_.RouteMetric + $_.InterfaceMetric } | Select-Object -First 1
+          $a = Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $r.InterfaceIndex |
+            Where-Object { $_.AddressState -eq 'Preferred' -and !$_.SkipAsSource } | Select-Object -First 1
+          if (!$a -or !$a.InterfaceIndex) { throw 'No usable IPv4 interface' }
+          "LAB_IP=$($a.IPAddress)" >> $env:GITHUB_ENV
+          "LAB_IFINDEX=$($a.InterfaceIndex)" >> $env:GITHUB_ENV
+          "PATH=$pwd\easytier\third_party\x86_64;$env:PATH" >> $env:GITHUB_ENV
+      - name: Verify bound and unbound controls after the TLS and WS handshakes
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p easytier --lib tunnel::websocket::tests::connected_wss_retains_ipv4_interface -- --ignored --exact --nocapture | tee result.txt
+          grep -F '1 passed; 0 failed' result.txt
