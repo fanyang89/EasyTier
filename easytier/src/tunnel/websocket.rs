@@ -384,7 +384,8 @@ pub mod tests {
             };
             assert_eq!(ret, 0, "{}", std::io::Error::last_os_error());
             assert_eq!(len, 4);
-            let actual = u32::from_be_bytes(bytes);
+            // Winsock takes network order on set, but returns host order on get.
+            let actual = u32::from_ne_bytes(bytes);
             println!(
                 "WSS connected: bound={bound} expected_ifIndex={index} IP_UNICAST_IF={actual} raw={bytes:?}"
             );
