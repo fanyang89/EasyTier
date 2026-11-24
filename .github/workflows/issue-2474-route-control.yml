@@ -1,0 +1,53 @@
+name: Windows isolated TCP route control
+on:
+  push:
+    branches: [test/2474-windows-route-control]
+permissions:
+  contents: read
+jobs:
+  route:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: script/windows-route-control
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: false
+      - name: Start isolated echo peers and verify interface-bound TCP
+        run: |
+          $ErrorActionPreference = 'Stop'
+          go build -o fixture.exe .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item ../../easytier/third_party/x86_64/wintun.dll .
+          $procs = @()
+          try {
+            foreach ($name in 'LabUnder','LabAlt') {
+              $p = Start-Process .\fixture.exe -ArgumentList $name -PassThru -NoNewWindow -RedirectStandardOutput "$name.out" -RedirectStandardError "$name.err"
+              $procs += $p
+              $deadline = [DateTime]::UtcNow.AddSeconds(30)
+              while (!(Select-String -Quiet -SimpleMatch "ready $name" "$name.out")) {
+                if ($p.HasExited -or [DateTime]::UtcNow -gt $deadline) { throw "Fixture not ready: $name" }
+                Start-Sleep -Milliseconds 200
+              }
+            }
+            New-NetIPAddress -InterfaceAlias LabUnder -IPAddress 198.18.247.2 -PrefixLength 24 -PolicyStore ActiveStore
+            New-NetIPAddress -InterfaceAlias LabAlt -IPAddress 198.19.247.2 -PrefixLength 24 -PolicyStore ActiveStore
+            $env:LAB_IFINDEX = (Get-NetAdapter -Name LabUnder).ifIndex
+            $deadline = [DateTime]::UtcNow.AddSeconds(15)
+            while (@(Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias LabUnder,LabAlt | Where-Object AddressState -eq 'Tentative').Count) {
+              if ([DateTime]::UtcNow -gt $deadline) { throw 'DAD timeout' }
+              Start-Sleep -Milliseconds 200
+            }
+            python -u egress_test.py
+            if ($LASTEXITCODE -ne 0) { throw 'Windows routing test failed' }
+          } finally {
+            $procs | Where-Object { !$_.HasExited } | Stop-Process -Force
+            Get-Content Lab*.err
+          }
