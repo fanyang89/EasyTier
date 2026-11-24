@@ -5,6 +5,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/netip"
@@ -43,24 +44,46 @@ func serve(name string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	vdev, stack, err := netstack.CreateNetTUN([]netip.Addr{target.Addr()}, nil, 1400)
-	if err != nil {
-		log.Fatal(err)
-	}
-	ln, err := stack.ListenTCPAddrPort(target)
+	neighbor := target.Addr().Next()
+	vdev, stack, err := netstack.CreateNetTUN([]netip.Addr{target.Addr(), neighbor}, nil, 1400)
 	if err != nil {
 		log.Fatal(err)
 	}
 	go forward(vdev, dev)
 	go forward(dev, vdev)
-	fmt.Println("ready", name)
-	for {
-		c, err := ln.Accept()
+	listen := func(addr netip.AddrPort, handle func(net.Conn)) {
+		ln, err := stack.ListenTCPAddrPort(addr)
 		if err != nil {
 			log.Fatal(err)
 		}
-		go echo(c, name)
+		go func() {
+			for {
+				c, err := ln.Accept()
+				if err != nil {
+					log.Fatal(err)
+				}
+				go handle(c)
+			}
+		}()
 	}
+	for _, ip := range []netip.Addr{target.Addr(), neighbor} {
+		listen(netip.AddrPortFrom(ip, target.Port()), func(c net.Conn) { echo(c, name) })
+	}
+	if name == "LabUnder" {
+		listen(netip.AddrPortFrom(target.Addr(), 24444), func(c net.Conn) {
+			defer c.Close()
+			up, err := net.Dial("tcp4", "127.0.0.1:29444")
+			if err != nil {
+				log.Print(err)
+				return
+			}
+			defer up.Close()
+			go func() { _, _ = io.Copy(up, c); _ = up.Close() }()
+			_, _ = io.Copy(c, up)
+		})
+	}
+	fmt.Println("ready", name)
+	select {}
 }
 
 func main() {
